@@ -174,5 +174,12 @@
 #define STORAGE_MODE USE_NONE ///< Selected options
 /// @}
 
+///
+/// @brief 12- Debug timing dump for display flush
+///
+/// @{
+#define FLUSH_TIMING 0 ///< Set to 1 to dump flush() function timing info to serial port
+/// @}
+
 #endif // hV_LIST_OPTIONS_RELEASE
 

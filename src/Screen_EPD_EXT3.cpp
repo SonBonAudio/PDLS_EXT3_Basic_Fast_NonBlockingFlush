@@ -658,15 +658,46 @@ void Screen_EPD_EXT3_Fast::flush()
 void Screen_EPD_EXT3_Fast::_flushFast()
 {
     // Configure
+#if FLUSH_TIMING
+    Serial.println("COG_initial");
+    uint32_t t0 = millis();
+#endif
     COG_initial(UPDATE_FAST);
+#if FLUSH_TIMING
+    uint32_t t1 = millis();
+    char msg[8];
+    itoa(t1 - t0, msg, 10);
+    Serial.println(msg);
 
+    Serial.println("COG_send");
+    t0 = millis();
+#endif
     // Send image data
     COG_sendImageDataFast();
+#if FLUSH_TIMING
+    t1 = millis();
+    itoa(t1 - t0, msg, 10);
+    Serial.println(msg);
 
+    Serial.println("COG_update");
+    t0 = millis();
+#endif
     // Update
     COG_update(UPDATE_FAST);
+#if FLUSH_TIMING
+    t1 = millis();
+    itoa(t1 - t0, msg, 10);
+    Serial.println(msg);
 
+    Serial.println("COG_off");
+    t0 = millis();
+#endif
     COG_powerOff();
+#if FLUSH_TIMING
+    t1 = millis();
+    itoa(t1 - t0, msg, 10);
+    Serial.println(msg);
+#endif
 }
 
 void Screen_EPD_EXT3_Fast::clear(uint16_t colour)
