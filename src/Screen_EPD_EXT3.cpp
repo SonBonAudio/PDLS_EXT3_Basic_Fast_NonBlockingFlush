@@ -98,9 +98,9 @@ void Screen_EPD_EXT3_Fast::COG_initial(uint8_t updateMode)
     else
     {
         // Work settings
-        uint8_t indexE0_work[1]; // Activate temperature
-        uint8_t indexE5_work[1]; // Temperature
-        uint8_t index00_work[2]; // PSR
+        //uint8_t indexE0_work[1]; // Activate temperature
+        //uint8_t indexE5_work[1]; // Temperature
+        //uint8_t index00_work[2]; // PSR
 
         indexE0_work[0] = indexE0_data[0];
         indexE5_data[0] = u_temperature;
@@ -270,7 +270,6 @@ void Screen_EPD_EXT3_Fast::COG_update(uint8_t updateMode)
         // Specific settings for fast update, 154 213 266 and 370 screens (_flag50)
         if ((u_codeExtra & FEATURE_FAST) and (updateMode != UPDATE_GLOBAL) and _flag50)
         {
-            uint8_t index50b_work[1]; // Vcom
             index50b_work[0] = index50b_data[0]; // 0x07
             b_sendIndexData(0x50, index50b_work, 1); // Vcom and data interval setting
         }
@@ -306,7 +305,8 @@ void Screen_EPD_EXT3_Fast::COG_powerOff()
 //
 // === Class section
 //
-Screen_EPD_EXT3_Fast::Screen_EPD_EXT3_Fast(eScreen_EPD_EXT3_t eScreen_EPD_EXT3, pins_t board)
+Screen_EPD_EXT3_Fast::Screen_EPD_EXT3_Fast(eScreen_EPD_EXT3_t eScreen_EPD_EXT3, pins_t board) :
+    flushPending(false), flushState(kReady), nextBusyPinState(false)
 {
     u_eScreen_EPD_EXT3 = eScreen_EPD_EXT3;
     b_pin = board;
@@ -698,6 +698,162 @@ void Screen_EPD_EXT3_Fast::_flushFast()
     itoa(t1 - t0, msg, 10);
     Serial.println(msg);
 #endif
+}
+
+void Screen_EPD_EXT3_Fast::flush_task()
+{
+    if (flushState == kReady) return;
+    if (digitalRead(b_pin.panelBusy) != nextBusyPinState) return;
+
+    switch (flushState)
+    {
+        case kCOGInitial_1:
+            // finish COG_Initial _flag152 case
+            // Work settings
+            b_sendCommandData8(0x1a, u_temperature);
+            b_sendCommandData8(0x3c, 0xc0);
+            b_sendCommandData8(0x22, 0xdf);
+
+            flush_sendImageAndStartUpdate();
+            break;
+        case kCOGInitial_2:
+            // finish COG_Initial else
+            b_sendIndexData(0xe5, indexE5_work, 1); // Input Temperature
+            b_sendIndexData(0xe0, indexE0_work, 1); // Activate Temperature
+
+            if (u_codeSize == 0x29) // No PSR
+            {
+                b_sendCommandData8(0x4d, 0x55);
+                b_sendCommandData8(0xe9, 0x02);
+            }
+            else
+            {
+                b_sendIndexData(0x00, index00_work, 2); // PSR
+            }
+
+            // Specific settings for fast update, all screens
+            if (u_codeExtra & FEATURE_FAST)
+            {
+                uint8_t index50c_work[1]; // Vcom
+                index50c_work[0] = index50c_data[0]; // 0x07
+                b_sendIndexData(0x50, index50c_work, 1); // Vcom and data interval setting
+            }
+
+            // Additional settings for fast update, 154 213 266 and 370 screens (_flag50)
+            if ((u_codeExtra & FEATURE_FAST) && _flag50)
+            {
+                uint8_t index50a_work[1]; // Vcom
+                index50a_work[0] = index50a_data[0]; // 0x27
+                b_sendIndexData(0x50, index50a_work, 1); // Vcom and data interval setting
+            }
+
+            flush_sendImageAndStartUpdate();
+            break;
+        case kCOGUpdate_1:
+            b_sendCommand8(0x20); // Display Refresh
+            digitalWrite(b_pin.panelCS, HIGH); // CS# = 1
+            nextBusyPinState = LOW;
+            flushState = kCOGPowerOff_1;
+            break;
+        case kCOGUpdate_2:
+            b_sendCommand8(0x12); // Display Refresh
+            digitalWrite(b_pin.panelCS, HIGH); // CS# = 1
+            nextBusyPinState = HIGH;
+            flushState = kCOGPowerOff_1;
+            break;
+        case kCOGPowerOff_1:
+            if (_flag152 == true)
+            {
+                flushState = kReady;
+            }
+            else
+            {
+                b_sendCommand8(0x02); // Turn off DC/DC
+                digitalWrite(b_pin.panelCS, HIGH); // CS# = 1
+                nextBusyPinState = HIGH;
+                flushState = kCOGPowerOff_2;
+            }
+            break;
+        case kCOGPowerOff_2:
+            flushState = kReady;
+            break;
+        default:
+            break;
+    }
+
+    if ((flushState == kReady) && flushPending)
+    {
+        // start a new flush cycle
+        flush_nonBlocking();
+        flushPending = false;
+    }
+}
+
+void Screen_EPD_EXT3_Fast::flush_sendImageAndStartUpdate()
+{
+    COG_sendImageDataFast();
+
+    // start COG_Update
+    if (_flag152 == true)
+    {
+        nextBusyPinState = LOW;
+        flushState = kCOGUpdate_1;
+    }
+    else
+    {
+        // Specific settings for fast update, 154 213 266 and 370 screens (_flag50)
+        if ((u_codeExtra & FEATURE_FAST) && _flag50)
+        {
+            index50b_work[0] = index50b_data[0]; // 0x07
+            b_sendIndexData(0x50, index50b_work, 1); // Vcom and data interval setting
+        }
+
+        b_sendCommand8(0x04); // Power on
+        digitalWrite(b_pin.panelCS, HIGH); // CS# = 1
+        nextBusyPinState = HIGH;
+        flushState = kCOGUpdate_2;
+    }
+}
+
+void Screen_EPD_EXT3_Fast::flush_nonBlocking()
+{
+    if (flushState != kReady)
+    {
+        flushPending = true;
+        return;
+    }
+
+    if (_flag152 == true)
+    {
+        // Soft reset
+        b_sendCommand8(0x12);
+        digitalWrite(b_pin.panelDC, LOW); // Select
+        nextBusyPinState = LOW;
+        flushState = kCOGInitial_1;
+    }
+    else
+    {
+        indexE0_work[0] = indexE0_data[0];
+        indexE5_data[0] = u_temperature;
+        if (u_codeExtra & FEATURE_FAST) // Specific settings for fast update
+        {
+            indexE5_work[0] = indexE5_data[0] | 0x40; // temperature | 0x40
+            index00_work[0] = index00_data[0] | 0x10; // PSR0 | 0x10
+            index00_work[1] = index00_data[1] | 0x02; // PSR1 | 0x02
+        }
+        else // Common settings
+        {
+            indexE5_work[0] = indexE5_data[0]; // Temperature
+            index00_work[0] = index00_data[0]; // PSR0
+            index00_work[1] = index00_data[1]; // PSR1
+        } // u_codeExtra updateMode
+
+        // New algorithm
+        uint8_t index00_reset[] = {0x0e};
+        b_sendIndexData(0x00, index00_reset, 1); // Soft-reset
+        nextBusyPinState = HIGH;
+        flushState = kCOGInitial_2;
+    }
 }
 
 void Screen_EPD_EXT3_Fast::clear(uint16_t colour)

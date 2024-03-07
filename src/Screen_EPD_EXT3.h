@@ -157,6 +157,19 @@ class Screen_EPD_EXT3_Fast final : public hV_Screen_Buffer, public hV_Utilities_
     ///
     uint8_t flushMode(uint8_t updateMode = UPDATE_FAST);
 
+    ///
+    /// @brief Initiate a display update without blocking the CPU until the screen update is complete
+    /// @details Display next frame-buffer on screen and copy next frame-buffer into old frame-buffer
+    /// @note Requires the flush_task() method to be called regularly to continue the update operation
+    ///
+    void flush_nonBlocking();
+
+    ///
+    /// @brief Continue a display update that was initiated with flush_nonBlocking()
+    /// @note This function must be called regularly in applications that use flush_nonBlocking()
+    ///
+    void flush_task();
+
   protected:
     /// @cond
 
@@ -229,6 +242,29 @@ class Screen_EPD_EXT3_Fast final : public hV_Screen_Buffer, public hV_Utilities_
 
     bool _flag50;
     bool _flag152;
+
+    // * Non-blocking Flush
+    void flush_sendImageAndStartUpdate();
+
+    enum FlushState
+    {
+        kReady = 0,
+        kCOGInitial_1,
+        kCOGInitial_2,
+        kCOGUpdate_1,
+        kCOGUpdate_2,
+        kCOGPowerOff_1,
+        kCOGPowerOff_2
+    };
+
+    bool flushPending;
+    FlushState flushState;
+    bool nextBusyPinState;
+    // Work settings
+    uint8_t index50b_work[1]; // Vcom
+    uint8_t indexE0_work[1]; // Activate temperature
+    uint8_t indexE5_work[1]; // Temperature
+    uint8_t index00_work[2]; // PSR
 
     //
     // === Touch section
