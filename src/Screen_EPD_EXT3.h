@@ -170,6 +170,9 @@ class Screen_EPD_EXT3_Fast final : public hV_Screen_Buffer, public hV_Utilities_
     ///
     void flush_task();
 
+    bool is_ready(void)
+    { return  (flushState == kReady) ? true: false; }
+
   protected:
     /// @cond
 
