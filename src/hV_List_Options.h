@@ -78,7 +78,7 @@
 /// * USE_FONT_FLASH: eg. 64
 ///
 #if (FONT_MODE == USE_FONT_TERMINAL)
-#define MAX_FONT_SIZE 4
+#define MAX_FONT_SIZE  1 /// 9/26/2024 MKS:  For 'small_font_only' branch (e.g. for bootloader).  was 4
 #else
 #define MAX_FONT_SIZE 64
 #endif
