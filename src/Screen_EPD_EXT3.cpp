@@ -8,10 +8,8 @@
 //
 // Created by Rei Vilo, 28 Jun 2016
 //
-// Copyright (c) Rei Vilo, 2010-2024
+// Copyright (c) Rei Vilo, 2010-2023
 // Licence Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)
-// For exclusive use with Pervasive Displays screens
-// Portions (c) Pervasive Displays, 2010-2024
 //
 // Release 509: Added eScreen_EPD_EXT3_271_Fast
 // Release 527: Added support for ESP32 PSRAM
@@ -29,831 +27,276 @@
 // Release 701: Added support for eScreen_EPD_EXT3_290_0F_Wide xE2290KS0Fx
 // Release 702: Added support for eScreen_EPD_EXT3_206_0E_Wide xE2206KS0Ex
 // Release 703: Added support for eScreen_EPD_EXT3_152_0J_Wide xE2152KS0Jx
-// Release 800: Read OTP memory
-// Release 801: Improved OTP implementation
-// Release 802: Added support for 343-KS-0B xE2343PS0Bx
-// Release 802: Added references to application notes
-// Release 802: Refactored CoG functions
-// Release 803: Added types for string and frame-buffer
-// Release 804: Improved power management
 //
 
 // Library header
 #include "Screen_EPD_EXT3.h"
 
+#if defined(ENERGIA)
+///
+/// @brief Proxy for SPISettings
+/// @details Not implemented in Energia
+/// @see https://www.arduino.cc/en/Reference/SPISettings
+///
+struct _SPISettings_s
+{
+    uint32_t clock; ///< in Hz, checked against SPI_CLOCK_MAX = 16000000
+    uint8_t bitOrder; ///< LSBFIRST, MSBFIRST
+    uint8_t dataMode; ///< SPI_MODE0, SPI_MODE1, SPI_MODE2, SPI_MODE3
+};
+///
+/// @brief SPI settings for screen
+///
+_SPISettings_s _settingScreen;
+#else
+///
+/// @brief SPI settings for screen
+///
+SPISettings _settingScreen;
+#endif // ENERGIA
+
+#ifndef SPI_CLOCK_MAX
+#define SPI_CLOCK_MAX 16000000
+#endif
+
 //
 // === COG section
 //
 /// @cond
-/// @see
-/// * ApplicationNote_smallSize_fast-update_v02_20220907
-/// * ApplicationNote_Small_Size_wide-Temperature_EPD_v03_20231031_B
-/// * ApplicationNote_Small_Size_wide-Temperature_EPD_v01_20231225_A
-/// * ApplicationNote_EPD343_Mono(E2343PS0Bx)_240320a
-/// * ApplicationNote_for_5.8inch_fast-update_EPDE2581PS0B1_20230206b
-/// * ApplicationNote_152_Size_wide-Temperature_EPD_v01_20231225_A
-//
 
-//
-// --- Medium screens with K or P film
-//
-void Screen_EPD_EXT3_Fast::COG_MediumKP_reset()
+// Common settings
+// 0x00, soft-reset, temperature, active temperature, PSR0, PSR1
+uint8_t indexE5_data[] = {0x19}; // Temperature 0x19 = 25 °C
+uint8_t indexE0_data[] = {0x02}; // Activate temperature
+uint8_t index00_data[] = {0xff, 0x8f}; // PSR, constant
+uint8_t index50a_data[] = {0x27}; // Only 154 213 266 and 370 screens, constant
+uint8_t index50b_data[] = {0x07}; // Only 154 213 266 and 370 screens, constant
+uint8_t index50c_data[] = {0x07}; // All screens, constant
+
+void Screen_EPD_EXT3_Fast::COG_initial(uint8_t updateMode)
 {
-    // Application note § 2. Power on COG driver
-    b_reset(5, 2, 4, 20, 5); // Medium
-}
-
-void Screen_EPD_EXT3_Fast::COG_MediumKP_getDataOTP()
-{
-    // Read OTP
-    uint8_t ui8 = 0;
-    uint16_t _readBytes = 0;
-    u_flagOTP = false;
-
-    COG_MediumKP_reset();
-    if (b_family == FAMILY_LARGE)
+    if (_flag152 == true)
     {
-        digitalWrite(b_pin.panelCSS, HIGH); // Unselect slave panel
-    }
+        // Soft reset
+        b_sendCommand8(0x12);
+        digitalWrite(b_pin.panelDC, LOW); // Select
+        b_waitBusy(LOW); // 150 and 152 specific
 
-    // Read OTP
-    switch (u_codeDriver)
-    {
-        case DRIVER_B:
+        // Work settings
+        b_sendCommandData8(0x1a, u_temperature);
 
-            _readBytes = 128;
-
-            digitalWrite(b_pin.panelDC, LOW); // Command
-            digitalWrite(b_pin.panelCS, LOW); // Select
-            hV_HAL_SPI3_write(0xb9);
-            delay(5);
-            break;
-
-        default:
-
-            mySerial.println();
-            mySerial.println(formatString("hV * OTP failed for screen %i-%cS-0%c", u_codeSize, u_codeFilm, u_codeDriver));
-            while (0x01);
-            break;
-    }
-
-    digitalWrite(b_pin.panelDC, HIGH); // Data
-    ui8 = hV_HAL_SPI3_read(); // Dummy
-    // hV_HAL_log(LEVEL_DEBUG, "Dummy read 0x%02x", ui8);
-
-    // Populate COG_data
-    for (uint16_t index = 0; index < _readBytes; index += 1)
-    {
-        COG_data[index] = hV_HAL_SPI3_read(); // Read OTP
-    }
-
-    // End of OTP reading
-    digitalWrite(b_pin.panelCS, HIGH); // Unselect
-
-    // Check
-    uint8_t _chipId;
-    switch (u_eScreen_EPD)
-    {
-        case eScreen_EPD_343_PS_0B:
-        case eScreen_EPD_343_PS_0B_Touch:
-        case eScreen_EPD_581_PS_0B:
-
-            _chipId = 0x10;
-            u_flagOTP = (COG_data[0x00] == _chipId);
-            break;
-
-        case eScreen_EPD_581_KS_0B:
-
-            _chipId = 0x16;
-            u_flagOTP = (COG_data[0x00] == _chipId);
-            break;
-
-        default:
-
-            _chipId = 0x00;
-            u_flagOTP = false;
-            break;
-    }
-
-    if (u_flagOTP == true)
-    {
-        mySerial.println("hV . OTP check passed");
+        if (updateMode == UPDATE_GLOBAL)
+        {
+            b_sendCommandData8(0x22, 0xd7);
+        }
+        else if (updateMode == UPDATE_FAST)
+        {
+            b_sendCommandData8(0x3c, 0xc0);
+            b_sendCommandData8(0x22, 0xdf);
+        }
     }
     else
     {
-        mySerial.println();
-        mySerial.println(formatString("hV * OTP check failed - First byte 0x%02x, expected 0x%04x", COG_data[0x00], _chipId));
-        while (0x01);
-    }
-}
+        // Work settings
+        //uint8_t indexE0_work[1]; // Activate temperature
+        //uint8_t indexE5_work[1]; // Temperature
+        //uint8_t index00_work[2]; // PSR
 
-void Screen_EPD_EXT3_Fast::COG_MediumKP_initial(uint8_t updateMode)
-{
-    uint8_t workDCTL[2];
-    workDCTL[0] = COG_data[0x10]; // DCTL
-    workDCTL[1] = 0x00;
-    b_sendIndexData(0x01, workDCTL, 2);
-}
-
-void Screen_EPD_EXT3_Fast::COG_MediumKP_sendImageData(uint8_t updateMode)
-{
-    // Application note § 3.2 Input image to the EPD
-    FRAMEBUFFER_TYPE nextBuffer = s_newImage;
-    FRAMEBUFFER_TYPE previousBuffer = s_newImage + u_pageColourSize;
-
-    // Send image data
-    b_sendIndexData(0x13, &COG_data[0x15], 6); // DUW
-    b_sendIndexData(0x90, &COG_data[0x0c], 4); // DRFW
-
-    // Next frame
-    b_sendIndexData(0x12, &COG_data[0x12], 3); // RAM_RW
-    b_sendIndexData(0x10, nextBuffer, u_pageColourSize); // Next frame
-
-    switch (updateMode)
-    {
-        case UPDATE_GLOBAL:
-
-            // Previous frame = dummy
-            b_sendIndexData(0x12, &COG_data[0x12], 3); // RAM_RW
-            b_sendIndexFixed(0x11, 0x00, u_pageColourSize); // Previous frame = dummy
-
-            break;
-
-        case UPDATE_FAST:
-
-            // Previous frame
-            b_sendIndexData(0x12, &COG_data[0x12], 3); // RAM_RW
-            b_sendIndexData(0x11, previousBuffer, u_pageColourSize); // Next frame
-            break;
-
-        default:
-            break;
-    }
-
-    // Copy next frame to previous frame
-    memcpy(previousBuffer, nextBuffer, u_pageColourSize); // Copy displayed next to previous
-}
-
-void Screen_EPD_EXT3_Fast::COG_MediumKP_update(uint8_t updateMode)
-{
-    // Initial COG
-    // Application note § 3.1 Initial flow chart
-    b_sendCommandData8(0x05, 0x7d);
-    delay(50);
-    b_sendCommandData8(0x05, 0x00);
-    delay(1);
-    b_sendCommandData8(0xd8, COG_data[0x1c]); // MS_SYNC
-    b_sendCommandData8(0xd6, COG_data[0x1d]); // BVSS
-
-    b_sendCommandData8(0xa7, 0x10);
-    delay(2);
-    b_sendCommandData8(0xa7, 0x00);
-    delay(10);
-
-    b_sendCommandData8(0x44, 0x00);
-    b_sendCommandData8(0x45, 0x80);
-
-    b_sendCommandData8(0xa7, 0x10);
-    delay(2);
-    b_sendCommandData8(0xa7, 0x00);
-    delay(10);
-
-    uint8_t indexTemperature;
-    switch (u_eScreen_EPD)
-    {
-        case eScreen_EPD_343_PS_0B:
-        case eScreen_EPD_343_PS_0B_Touch:
-
-            switch (updateMode)
-            {
-                case UPDATE_FAST:
-
-                    indexTemperature = (u_temperature < 22) ? 0xc9 : 0xca;
-                    break;
-
-                case UPDATE_GLOBAL:
-
-                    indexTemperature = 2 * u_temperature + 0x50; // Temperature 0x82@25C
-                    // indexTemperature = (u_temperature > 50) ? 0xb4 : indexTemperature;
-                    indexTemperature = checkRange(indexTemperature, (uint8_t)0x50, (uint8_t)0xb4);
-                    break;
-
-                default:
-
-                    break;
-            }
-
-        case eScreen_EPD_581_PS_0B:
-
-            switch (updateMode)
-            {
-                case UPDATE_FAST:
-
-                    indexTemperature = (u_temperature + 0x28) + 0x80;
-                    break;
-
-                case UPDATE_GLOBAL:
-
-                    indexTemperature = u_temperature + 0x28; // Temperature 0x41@25C
-                    // indexTemperature = (u_temperature > 50) ? 0x5a : indexTemperature;
-                    // indexTemperature = (u_temperature < 0) ? 0x28 : indexTemperature;
-                    indexTemperature = checkRange(indexTemperature, (uint8_t)0x28, (uint8_t)0x5a);
-                    break;
-
-                default:
-
-                    break;
-            }
-            break;
-
-        case eScreen_EPD_581_KS_0B:
-
-            switch (updateMode)
-            {
-                case UPDATE_FAST:
-
-                    indexTemperature = (u_temperature + 0x28) + 0x80;
-                    // indexTemperature = (u_temperature > 50) ? 0xda : indexTemperature;
-                    // indexTemperature = (u_temperature < 0) ? 0xa8 : indexTemperature;
-                    indexTemperature = checkRange(indexTemperature, (uint8_t)0xa8, (uint8_t)0xda);
-                    break;
-
-                case UPDATE_GLOBAL:
-
-                    indexTemperature = u_temperature + 0x28; // Temperature 0x41@25C
-                    // indexTemperature = (u_temperature > 60) ? 0x64 : indexTemperature;
-                    // indexTemperature = (u_temperature < -15) ? 0x19 : indexTemperature;
-                    indexTemperature = checkRange(indexTemperature, (uint8_t)0x19, (uint8_t)0x64);
-                    break;
-
-                default:
-
-                    break;
-            }
-            break;
-
-        default:
-
-            break;
-    }
-
-    b_sendCommandData8(0x44, 0x06);
-    b_sendCommandData8(0x45, indexTemperature);
-
-    b_sendCommandData8(0xa7, 0x10);
-    delay(2);
-    b_sendCommandData8(0xa7, 0x00);
-    delay(10);
-
-    b_sendCommandData8(0x60, COG_data[0x0b]); // TCON
-    b_sendCommandData8(0x61, COG_data[0x1b]); // STV_DIR
-    // No DCTL here
-    b_sendCommandData8(0x02, COG_data[0x11]); // VCOM
-    switch (u_eScreen_EPD)
-    {
-        case eScreen_EPD_581_KS_0B:
-
-            b_sendCommandData8(0x03, COG_data[0x1f]); // VCOM_CTRL
-            break;
-
-        default:
-
-            break;
-    }
-
-    // DC/DC Soft-start
-    // Application note § 3.3 DC/DC soft-start
-    // DRIVER_B = 0x28, DRIVER_8 = 0x20
-    uint8_t offsetFrame = 0x28;
-
-    // Filter for register 0x09
-    uint8_t _filter09 = 0xff;
-
-    switch (u_eScreen_EPD)
-    {
-        case eScreen_EPD_343_PS_0B:
-        case eScreen_EPD_343_PS_0B_Touch:
-
-            _filter09 = 0xfb;
-            break;
-
-        default:
-
-            _filter09 = 0xff;
-            break;
-    }
-
-    for (uint8_t stage = 0; stage < 4; stage += 1)
-    {
-        uint8_t offset = offsetFrame + 0x08 * stage;
-        uint8_t FORMAT = COG_data[offset] & 0x80;
-        uint8_t REPEAT = COG_data[offset] & 0x7f;
-
-        if (FORMAT > 0) // Format 1
+        indexE0_work[0] = indexE0_data[0];
+        indexE5_data[0] = u_temperature;
+        if ((u_codeExtra & FEATURE_FAST) and (updateMode != UPDATE_GLOBAL)) // Specific settings for fast update
         {
-            uint8_t PHL_PHH[2];
-            PHL_PHH[0] = COG_data[offset + 1]; // PHL_INI
-            PHL_PHH[1] = COG_data[offset + 2]; // PHH_INI
-            uint8_t PHL_VAR = COG_data[offset + 3];
-            uint8_t PHH_VAR = COG_data[offset + 4];
-            uint8_t BST_SW_a = COG_data[offset + 5] & _filter09;
-            uint8_t BST_SW_b = COG_data[offset + 6] & _filter09;
-            uint8_t DELAY_SCALE = COG_data[offset + 7] & 0x80;
-            uint16_t DELAY_VALUE = COG_data[offset + 7] & 0x7f;
-
-            for (uint8_t i = 0; i < REPEAT; i += 1)
-            {
-                b_sendCommandData8(0x09, BST_SW_a);
-                PHL_PHH[0] += PHL_VAR; // PHL
-                PHL_PHH[1] += PHH_VAR; // PHH
-                b_sendIndexData(0x51, PHL_PHH, 2);
-                b_sendCommandData8(0x09, BST_SW_b);
-
-                if (DELAY_SCALE > 0)
-                {
-                    delay(DELAY_VALUE); // ms
-                }
-                else
-                {
-                    delayMicroseconds(10 * DELAY_VALUE); //10 us
-                }
-            }
+            indexE5_work[0] = indexE5_data[0] | 0x40; // temperature | 0x40
+            index00_work[0] = index00_data[0] | 0x10; // PSR0 | 0x10
+            index00_work[1] = index00_data[1] | 0x02; // PSR1 | 0x02
         }
-        else // Format 2
+        else // Common settings
         {
-            uint8_t BST_SW_a = COG_data[offset + 1] & _filter09;
-            uint8_t BST_SW_b = COG_data[offset + 2] & _filter09;
-            uint8_t DELAY_a_SCALE = COG_data[offset + 3] & 0x80;
-            uint16_t DELAY_a_VALUE = COG_data[offset + 3] & 0x7f;
-            uint8_t DELAY_b_SCALE = COG_data[offset + 4] & 0x80;
-            uint16_t DELAY_b_VALUE = COG_data[offset + 4] & 0x7f;
+            indexE5_work[0] = indexE5_data[0]; // Temperature
+            index00_work[0] = index00_data[0]; // PSR0
+            index00_work[1] = index00_data[1]; // PSR1
+        } // u_codeExtra updateMode
 
-            for (uint8_t i = 0; i < REPEAT; i += 1)
-            {
-                b_sendCommandData8(0x09, BST_SW_a);
+        // New algorithm
+        uint8_t index00_reset[] = {0x0e};
+        b_sendIndexData(0x00, index00_reset, 1); // Soft-reset
+        b_waitBusy();
 
-                if (DELAY_a_SCALE > 0)
-                {
-                    delay(DELAY_a_VALUE); // ms
-                }
-                else
-                {
-                    delayMicroseconds(10 * DELAY_a_VALUE); // 10 us
-                }
+        b_sendIndexData(0xe5, indexE5_work, 1); // Input Temperature
+        b_sendIndexData(0xe0, indexE0_work, 1); // Activate Temperature
 
-                b_sendCommandData8(0x09, BST_SW_b);
-
-                if (DELAY_b_SCALE > 0)
-                {
-                    delay(DELAY_b_VALUE); // ms
-                }
-                else
-                {
-                    delayMicroseconds(10 * DELAY_b_VALUE); // 10 us
-                }
-            }
+        if (u_codeSize == 0x29) // No PSR
+        {
+            b_sendCommandData8(0x4d, 0x55);
+            b_sendCommandData8(0xe9, 0x02);
         }
-    }
-
-    // Display Refresh Start
-    // Application note § 4 Send updating command
-    b_waitBusy();
-    b_sendCommandData8(0x15, 0x3c);
-}
-
-void Screen_EPD_EXT3_Fast::COG_MediumKP_powerOff()
-{
-    // Application note § 5. Turn-off DC/DC
-
-    // DC-DC off
-    b_waitBusy();
-
-    switch (u_eScreen_EPD)
-    {
-        case eScreen_EPD_343_PS_0B:
-        case eScreen_EPD_343_PS_0B_Touch:
-        case eScreen_EPD_581_PS_0B:
-
-            b_sendCommandData8(0x09, 0x7b);
-            b_sendCommandData8(0x05, 0x5d);
-            b_sendCommandData8(0x09, 0x7a);
-            delay(15);
-            b_sendCommandData8(0x09, 0x00);
-            break;
-
-        case eScreen_EPD_581_KS_0B:
-
-            b_sendCommandData8(0x09, 0x7f);
-            b_sendCommandData8(0x05, 0x3d);
-            b_sendCommandData8(0x09, 0x7e);
-            delay(60);
-            b_sendCommandData8(0x09, 0x00);
-            break;
-
-        default:
-
-            break;
-    }
-}
-//
-// --- End of Medium screens with K or P film
-//
-
-//
-// --- Small screens with K or P film
-//
-void Screen_EPD_EXT3_Fast::COG_SmallKP_reset()
-{
-    // Application note § 2. Power on COG driver
-    b_reset(5, 5, 10, 5, 5); // Small
-
-    // Check after reset
-    switch (u_eScreen_EPD)
-    {
-        case eScreen_EPD_150_KS_0J:
-        case eScreen_EPD_152_KS_0J:
-
-            if (digitalRead(b_pin.panelBusy) == HIGH)
-            {
-                mySerial.println();
-                mySerial.println("hV * Incorrect type for 1.52-Wide");
-                while (0x01);
-            }
-            break;
-
-        default:
-
-            break;
-    }
-}
-
-void Screen_EPD_EXT3_Fast::COG_SmallKP_getDataOTP()
-{
-    // Read OTP
-    uint8_t ui8 = 0;
-    uint16_t _readBytes = 0;
-    u_flagOTP = false;
-
-    // Application note § 3. Read OTP memory
-    // Register 0x50 flag
-    // Additional settings for fast update, 154 206 213 266 271A 370 and 437 screens (s_flag50)
-    switch (u_eScreen_EPD)
-    {
-        case eScreen_EPD_154_PS_0C:
-        case eScreen_EPD_154_KS_0C:
-        case eScreen_EPD_206_KS_0E:
-        case eScreen_EPD_213_PS_0E:
-        case eScreen_EPD_213_KS_0E:
-        case eScreen_EPD_266_PS_0C:
-        case eScreen_EPD_266_KS_0C:
-        case eScreen_EPD_271_KS_0C: // 2.71(A)
-        case eScreen_EPD_370_PS_0C:
-        case eScreen_EPD_370_PS_0C_Touch:
-        case eScreen_EPD_370_KS_0C:
-        case eScreen_EPD_437_PS_0C:
-        case eScreen_EPD_437_KS_0C:
-
-            s_flag50 = true;
-            break;
-
-        default:
-
-            s_flag50 = false;
-            break;
-    }
-
-    // Screens with no OTP
-    switch (u_eScreen_EPD)
-    {
-        case eScreen_EPD_150_KS_0J:
-        case eScreen_EPD_152_KS_0J:
-        case eScreen_EPD_290_KS_0F:
-
-            u_flagOTP = true;
-            mySerial.println("hV . OTP check passed - embedded PSR");
-            return; // No PSR
-            break;
-
-        default:
-
-            break;
-    }
-
-    // GPIO
-    COG_SmallKP_reset(); // Although not mentioned, reset to ensure stable state
-
-    // Read OTP
-    _readBytes = 2;
-    ui8 = 0;
-
-    uint16_t offsetA5 = 0x0000;
-    uint16_t offsetPSR = 0x0000;
-
-    digitalWrite(b_pin.panelDC, LOW); // Command
-    digitalWrite(b_pin.panelCS, LOW); // Select
-    hV_HAL_SPI3_write(0xa2);
-    digitalWrite(b_pin.panelCS, HIGH); // Unselect
-    delay(10);
-
-    digitalWrite(b_pin.panelDC, HIGH); // Data
-    digitalWrite(b_pin.panelCS, LOW); // Select
-    ui8 = hV_HAL_SPI3_read(); // Dummy
-    digitalWrite(b_pin.panelCS, HIGH); // Unselect
-    // mySerial.println, "hV . Dummy read 0x%02x", ui8);
-
-    digitalWrite(b_pin.panelCS, LOW); // Select
-    ui8 = hV_HAL_SPI3_read(); // First byte to be checked
-    digitalWrite(b_pin.panelCS, HIGH); // Unselect
-    // hV_HAL_log(LEVEL_INFO, "ui8= 0x%02x", ui8);
-
-    // Check bank
-    uint8_t bank = ((ui8 == 0xa5) ? 0 : 1);
-
-    switch (u_eScreen_EPD)
-    {
-        case eScreen_EPD_271_KS_09:
-        case eScreen_EPD_271_KS_09_Touch:
-
-            offsetPSR = 0x004b;
-            offsetA5 = 0x0000;
-
-            if (bank > 0)
-            {
-                COG_data[0] = 0xcf;
-                COG_data[1] = 0x82;
-                return;
-            }
-            break;
-
-        case eScreen_EPD_271_PS_09:
-        // case eScreen_EPD_271_KS_09_Touch:
-        case eScreen_EPD_271_PS_09_Touch:
-        case eScreen_EPD_287_PS_09:
-
-            offsetPSR = 0x004b;
-            offsetA5 = 0x0000;
-
-            break;
-
-        case eScreen_EPD_154_KS_0C:
-        case eScreen_EPD_154_PS_0C:
-        case eScreen_EPD_266_KS_0C:
-        case eScreen_EPD_266_PS_0C:
-        case eScreen_EPD_271_KS_0C: // 2.71(A)
-        case eScreen_EPD_350_KS_0C:
-        case eScreen_EPD_370_KS_0C:
-        case eScreen_EPD_370_PS_0C:
-        case eScreen_EPD_370_PS_0C_Touch:
-        case eScreen_EPD_437_PS_0C:
-
-            offsetPSR = (bank == 0) ? 0x0fb4 : 0x1fb4;
-            offsetA5 = (bank == 0) ? 0x0000 : 0x1000;
-
-            break;
-
-        case eScreen_EPD_206_KS_0E:
-        case eScreen_EPD_213_KS_0E:
-        case eScreen_EPD_213_PS_0E:
-
-            offsetPSR = (bank == 0) ? 0x0b1b : 0x171b;
-            offsetA5 = (bank == 0) ? 0x0000 : 0x0c00;
-            break;
-
-        case eScreen_EPD_417_PS_0D:
-        case eScreen_EPD_417_KS_0D:
-
-            offsetPSR = (bank == 0) ? 0x0b1f : 0x171f;
-            offsetA5 = (bank == 0) ? 0x0000 : 0x0c00;
-            break;
-
-        default:
-
-            mySerial.println(formatString("hV * OTP check failed - Screen %i-%cS-0%c not supported", u_codeSize, u_codeFilm, u_codeDriver));
-            mySerial.flush();
-            while (true);
-            break;
-    }
-
-    // Check second bank
-    if (offsetA5 > 0x0000)
-    {
-        for (uint16_t index = 1; index < offsetA5; index += 1)
+        else
         {
-            digitalWrite(b_pin.panelCS, LOW); // Select
-            ui8 = hV_HAL_SPI3_read();
-            digitalWrite(b_pin.panelCS, HIGH); // Unselect
+            b_sendIndexData(0x00, index00_work, 2); // PSR
         }
 
-        digitalWrite(b_pin.panelCS, LOW); // Select
-        ui8 = hV_HAL_SPI3_read(); // First byte to be checked
-        digitalWrite(b_pin.panelCS, HIGH); // Unselect
-
-        if (ui8 != 0xa5)
+        // Specific settings for fast update, all screens
+        if ((u_codeExtra & FEATURE_FAST) and (updateMode != UPDATE_GLOBAL))
         {
-            mySerial.println();
-            mySerial.println(formatString("hV * OTP check failed - Bank %i, first 0x%02x, expected 0x%02x", bank, ui8, 0xa5));
-            mySerial.flush();
-            while (true);
+            uint8_t index50c_work[1]; // Vcom
+            index50c_work[0] = index50c_data[0]; // 0x07
+            b_sendIndexData(0x50, index50c_work, 1); // Vcom and data interval setting
+        }
+
+        // Additional settings for fast update, 154 213 266 and 370 screens (_flag50)
+        if ((u_codeExtra & FEATURE_FAST) and (updateMode != UPDATE_GLOBAL) and _flag50)
+        {
+            uint8_t index50a_work[1]; // Vcom
+            index50a_work[0] = index50a_data[0]; // 0x27
+            b_sendIndexData(0x50, index50a_work, 1); // Vcom and data interval setting
         }
     }
-
-    switch (u_eScreen_EPD)
-    {
-        case eScreen_EPD_271_KS_09:
-        case eScreen_EPD_271_PS_09:
-        case eScreen_EPD_271_PS_09_Touch:
-        // case eScreen_EPD_287_KS_09:
-        case eScreen_EPD_287_PS_09:
-
-            mySerial.println(formatString("hV . OTP check passed - Bank %i, first 0x%02x %s", bank, ui8, (bank == 0) ? "as expected" : "not checked"));
-            break;
-
-        default:
-
-            mySerial.println(formatString("hV . OTP check passed - Bank %i, first 0x%02x as expected", bank, ui8));
-            break;
-    }
-
-    // Ignore bytes 1..offsetPSR
-    for (uint16_t index = offsetA5 + 1; index < offsetPSR; index += 1)
-    {
-        digitalWrite(b_pin.panelCS, LOW); // Select
-        ui8 = hV_HAL_SPI3_read();
-        digitalWrite(b_pin.panelCS, HIGH); // Unselect
-    }
-
-    // Populate COG_data
-    for (uint16_t index = 0; index < _readBytes; index += 1)
-    {
-        digitalWrite(b_pin.panelCS, LOW); // Select
-        ui8 = hV_HAL_SPI3_read(); // Read OTP
-        COG_data[index] = ui8;
-        digitalWrite(b_pin.panelCS, HIGH); // Unselect
-    }
-
-    u_flagOTP = true;
 }
 
-void Screen_EPD_EXT3_Fast::COG_SmallKP_initial(uint8_t updateMode)
+void Screen_EPD_EXT3_Fast::COG_getUserData()
 {
-    // Application note § 4. Input initial command
-    switch (u_eScreen_EPD)
+    if (_flag152 == true)
     {
-        case eScreen_EPD_150_KS_0J:
-        case eScreen_EPD_152_KS_0J:
+        // Empty
+                _flag50 = false;
+    }
+    else
+    {
+        uint16_t u_codeSizeType = u_eScreen_EPD_EXT3 & 0xffff;
 
-            // Soft reset
-            b_sendCommand8(0x12);
-            digitalWrite(b_pin.panelDC, LOW);
-            b_waitBusy(LOW); // 150 and 152 specific
+        // Size cSize cType Driver
+        switch (u_codeSizeType)
+        {
+            case 0x150C: // 1.54” = 0xcf, 0x02
+            case 0x210E: // 2.13” = 0xcf, 0x02
+            case 0x260C: // 2.66” = 0xcf, 0x02
 
-            // Work settings
-            b_sendCommandData8(0x1a, u_temperature);
+                index00_data[0] = 0xcf;
+                index00_data[1] = 0x02;
+                _flag50 = true;
+                break;
 
-            if (updateMode == UPDATE_GLOBAL)
-            {
-                b_sendCommandData8(0x22, 0xd7);
-            }
-            else if (updateMode == UPDATE_FAST)
-            {
-                b_sendCommandData8(0x3c, 0xc0);
-                b_sendCommandData8(0x22, 0xdf);
-            }
-            break;
+            case 0x200E: // 2.06” = 0xcf, 0x02
 
-        default:
+                index00_data[0] = 0xcf;
+                index00_data[1] = 0x02;
+                _flag50 = true;
+                break;
 
-            // Work settings
-            uint8_t indexTemperature; // Temperature
-            uint8_t index00_work[2]; // PSR
+            case 0x2709: // 2.71” = 0xcf, 0x8d
 
-            // FILM_P and FILM_K already checked
-            if (updateMode != UPDATE_GLOBAL) // Specific settings for fast update
-            {
-                indexTemperature = u_temperature | 0x40; // temperature | 0x40
-                index00_work[0] = COG_data[0] | 0x10; // PSR0 | 0x10
-                index00_work[1] = COG_data[1] | 0x02; // PSR1 | 0x02
-            }
-            else // Common settings
-            {
-                indexTemperature = u_temperature; // Temperature
-                index00_work[0] = COG_data[0]; // PSR0
-                index00_work[1] = COG_data[1]; // PSR1
-            } // u_codeExtra updateMode
+                index00_data[0] = 0xcf;
+                index00_data[1] = 0x8d;
+                _flag50 = false;
+                break;
 
-            // New algorithm
-            b_sendCommandData8(0x00, 0x0e); // Soft-reset
-            b_waitBusy();
+            case 0x2809: // 2.87” = 0xcf, 0x8d
 
-            b_sendCommandData8(0xe5, indexTemperature); // Input Temperature
-            b_sendCommandData8(0xe0, 0x02); // Activate Temperature
+                index00_data[0] = 0xcf;
+                index00_data[1] = 0x8d;
+                _flag50 = false;
+                break;
 
-            if (u_codeSize == SIZE_290) // No PSR
-            {
-                b_sendCommandData8(0x4d, 0x55);
-                b_sendCommandData8(0xe9, 0x02);
-            }
-            else
-            {
-                b_sendIndexData(0x00, index00_work, 2); // PSR
-            }
+            case 0x290F: // 2.90” - No PSR
 
-            // Specific settings for fast update, all screens
-            // FILM_P and FILM_K already checked
-            if (updateMode != UPDATE_GLOBAL)
-            {
-                b_sendCommandData8(0x50, 0x07); // Vcom and data interval setting
-            }
-            break;
+                index00_data[0] = 0x00;
+                index00_data[1] = 0x00;
+                _flag50 = false;
+                break;
+
+            case 0x370C: // 3.70” = 0xcf, 0x0f
+
+                index00_data[0] = 0xcf;
+                index00_data[1] = 0x8f;
+                _flag50 = true;
+                break;
+
+            case 0x410D:// 4.17” = 0x0f, 0x0e
+
+                index00_data[0] = 0x0f;
+                index00_data[1] = 0x0e;
+                _flag50 = false;
+                break;
+
+            case 0x430C: // 4.37” = 0x0f, 0x0e
+
+                index00_data[0] = 0x0f;
+                index00_data[1] = 0x0e;
+                _flag50 = true;
+                break;
+
+            case 0x580B: // 5.81"
+
+                _flag50 = false;
+                break;
+
+            default:
+
+                _flag50 = false;
+                break;
+        }
     }
 }
 
-void Screen_EPD_EXT3_Fast::COG_SmallKP_sendImageData(uint8_t updateMode)
+void Screen_EPD_EXT3_Fast::COG_sendImageDataFast()
 {
-    // Application note § 5. Input image to the EPD
-    FRAMEBUFFER_TYPE nextBuffer = s_newImage;
-    FRAMEBUFFER_TYPE previousBuffer = s_newImage + u_pageColourSize;
+    uint8_t * nextBuffer = u_newImage;
+    uint8_t * previousBuffer = u_newImage + u_pageColourSize;
 
-    // Send image data
-    // case UPDATE_FAST:
-    switch (u_eScreen_EPD)
+    if (_flag152 == true)
     {
-        case eScreen_EPD_150_KS_0J:
-        case eScreen_EPD_152_KS_0J:
-
-            b_sendIndexData(0x24, previousBuffer, u_pageColourSize); // Next frame, blackBuffer
-            b_sendIndexData(0x26, nextBuffer, u_pageColourSize); // Previous frame, 0x00
-            break;
-
-        default:
-            // Additional settings for fast update, 154 213 266 370 and 437 screens (s_flag50)
-            if (s_flag50)
-            {
-                b_sendCommandData8(0x50, 0x27); // Vcom and data interval setting
-            }
-
-            b_sendIndexData(0x10, previousBuffer, u_pageColourSize); // First frame, blackBuffer
-            b_sendIndexData(0x13, nextBuffer, u_pageColourSize); // Second frame, 0x00
-
-            // Additional settings for fast update, 154 213 266 370 and 437 screens (s_flag50)
-            if (s_flag50)
-            {
-                b_sendCommandData8(0x50, 0x07); // Vcom and data interval setting
-            }
-            break;
-    } // u_eScreen_EPD
-
-    // Copy next frame to previous frame
-    memcpy(previousBuffer, nextBuffer, u_pageColourSize); // Copy displayed next to previous
+        b_sendIndexData(0x24, previousBuffer, u_frameSize); // Previous frame
+        b_sendIndexData(0x26, nextBuffer, u_frameSize); // Next frame
+    }
+    else
+    {
+        b_sendIndexData(0x10, previousBuffer, u_frameSize); // Previous frame
+        b_sendIndexData(0x13, nextBuffer, u_frameSize); // Next frame
+    }
+    memcpy(previousBuffer, nextBuffer, u_frameSize); // Copy displayed next to previous
 }
 
-void Screen_EPD_EXT3_Fast::COG_SmallKP_update(uint8_t updateMode)
+void Screen_EPD_EXT3_Fast::COG_update(uint8_t updateMode)
 {
-    // Application note § 6. Send updating command
-    switch (u_eScreen_EPD)
+    if (_flag152 == true)
     {
-        case eScreen_EPD_150_KS_0J:
-        case eScreen_EPD_152_KS_0J:
+        b_waitBusy(LOW); // 150 specific
+        b_sendCommand8(0x20); // Display Refresh
+        digitalWrite(b_pin.panelCS, HIGH); // CS# = 1
+        b_waitBusy(LOW); // 150 specific
+    }
+    else
+    {
+        // Specific settings for fast update, 154 213 266 and 370 screens (_flag50)
+        if ((u_codeExtra & FEATURE_FAST) and (updateMode != UPDATE_GLOBAL) and _flag50)
+        {
+            index50b_work[0] = index50b_data[0]; // 0x07
+            b_sendIndexData(0x50, index50b_work, 1); // Vcom and data interval setting
+        }
 
-            b_waitBusy(LOW); // 152 specific
-            b_sendCommand8(0x20); // Display Refresh
-            digitalWrite(b_pin.panelCS, HIGH); // CS# = 1
-            b_waitBusy(LOW); // 152 specific
-            break;
+        b_sendCommand8(0x04); // Power on
+        digitalWrite(b_pin.panelCS, HIGH); // CS# = 1
+        b_waitBusy();
 
-        default:
-
-            b_waitBusy();
-
-            b_sendCommand8(0x04); // Power on
-            b_waitBusy();
-
-            b_sendCommand8(0x12); // Display Refresh
-            b_waitBusy();
-            break;
+        b_sendCommand8(0x12); // Display Refresh
+        digitalWrite(b_pin.panelCS, HIGH); // CS# = 1
+        b_waitBusy();
     }
 }
 
-void Screen_EPD_EXT3_Fast::COG_SmallKP_powerOff()
+void Screen_EPD_EXT3_Fast::COG_powerOff()
 {
-    // Application note § 7. Turn-off DC/DC
-    switch (u_eScreen_EPD)
+    if (_flag152 == true)
     {
-        case eScreen_EPD_150_KS_0J:
-        case eScreen_EPD_152_KS_0J:
-
-            break;
-
-        default:
-
-            b_sendCommand8(0x02); // Turn off DC/DC
-            b_waitBusy();
-            break;
+        // Empty
+    }
+    else
+    {
+        b_sendCommand8(0x02); // Turn off DC/DC
+        digitalWrite(b_pin.panelCS, HIGH); // CS# = 1
+        b_waitBusy();
     }
 }
-//
-// --- End of Small screens with K or P film
-//
 /// @endcond
 //
 // === End of COG section
@@ -862,426 +305,328 @@ void Screen_EPD_EXT3_Fast::COG_SmallKP_powerOff()
 //
 // === Class section
 //
-Screen_EPD_EXT3_Fast::Screen_EPD_EXT3_Fast(eScreen_EPD_t eScreen_EPD_EXT3, pins_t board)
+Screen_EPD_EXT3_Fast::Screen_EPD_EXT3_Fast(eScreen_EPD_EXT3_t eScreen_EPD_EXT3, pins_t board) :
+    flushPending(false), flushState(kReady), nextBusyPinState(false)
 {
-    u_eScreen_EPD = eScreen_EPD_EXT3;
+    u_eScreen_EPD_EXT3 = eScreen_EPD_EXT3;
     b_pin = board;
-    s_newImage = 0; // nullptr
-    COG_data[0] = 0;
+    u_newImage = 0; // nullptr
 }
 
 void Screen_EPD_EXT3_Fast::begin()
 {
-    // u_eScreen_EPD = eScreen_EPD_EXT3;
-    u_codeSize = SCREEN_SIZE(u_eScreen_EPD);
-    u_codeFilm = SCREEN_FILM(u_eScreen_EPD);
-    u_codeDriver = SCREEN_DRIVER(u_eScreen_EPD);
-    u_codeExtra = SCREEN_EXTRA(u_eScreen_EPD);
-    v_screenColourBits = 2; // BWR and BWRY
+    u_codeExtra = (u_eScreen_EPD_EXT3 >> 16) & 0xff;
+    u_codeSize = (u_eScreen_EPD_EXT3 >> 8) & 0xff;
+    u_codeType = u_eScreen_EPD_EXT3 & 0xff;
+    _screenColourBits = 2; // BWR and BWRY
 
-    // Checks
-    switch (u_codeFilm)
-    {
-        case FILM_P: // BW, fast update
-        case FILM_K: // BW, fast update and wide temperature
-
-            break;
-
-        default:
-
-            debugVariant(FILM_P);
-            break;
-    }
-
-    //
-    // === Touch section
-    //
-
-    //
-    // === End of touch section
-    //
-
-    //
-    // === Large screen section
-    //
-    // Check panelCSS for large screens
-    if (((u_codeSize == SIZE_969) or (u_codeSize == SIZE_1198)) and (b_pin.panelCSS == NOT_CONNECTED))
-    {
-        mySerial.println();
-        mySerial.println("hV * Required pin panelCSS is NOT_CONNECTED");
-        while (0x01);
-    }
-    //
-    // === End of Large screen section
-    //
+    _flag152 = ((u_codeSize == 0x15) and (u_codeType == 0x4A));
 
     // Configure board
     switch (u_codeSize)
     {
-        case SIZE_343: // 3.43"
-        case SIZE_581: // 5.81"
-        case SIZE_741: // 7.41"
+        case 0x58: // 5.81"
+        case 0x74: // 7.41"
 
-            b_begin(b_pin, FAMILY_MEDIUM, 0);
-            break;
-
-        case SIZE_969: // 9.69"
-        case SIZE_1198: // 11.98"
-
-            b_begin(b_pin, FAMILY_LARGE, 50);
+            b_begin(b_pin, FAMILY_MEDIUM, 50);
             break;
 
         default:
 
-            b_begin(b_pin, FAMILY_SMALL, 0);
+            b_begin(b_pin, FAMILY_SMALL, 50);
             break;
     }
 
-    //
-    // === Touch section
-    //
-
-    //
-    // === End of touch section
-    //
-
-    // Sizes
     switch (u_codeSize)
     {
-        case SIZE_150: // 1.50"
-        case SIZE_152: // 1.52"
+        case 0x15: // 1.54"
 
-            v_screenSizeV = 200; // vertical = wide size
-            v_screenSizeH = 200; // horizontal = small size
+            if (_flag152)
+            {
+                _screenSizeV = 200; // vertical = wide size
+                _screenSizeH = 200; // horizontal = small size
+                _screenDiagonal = 152;
+
+            }
+            else
+            {
+                _screenSizeV = 152; // vertical = wide size
+                _screenSizeH = 152; // horizontal = small size
+                _screenDiagonal = 154;
+            }
             break;
 
-        case SIZE_154: // 1.54"
+        case 0x20: // 2.06"
 
-            v_screenSizeV = 152; // vertical = wide size
-            v_screenSizeH = 152; // horizontal = small size
+            _screenSizeV = 248; // vertical = wide size
+            _screenSizeH = 128; // horizontal = small size
+            _screenDiagonal = 206;
             break;
 
-        case SIZE_206: // 2.06"
+        case 0x21: // 2.13"
 
-            v_screenSizeV = 248; // vertical = wide size
-            v_screenSizeH = 128; // horizontal = small size
+            _screenSizeV = 212; // vertical = wide size
+            _screenSizeH = 104; // horizontal = small size
+            _screenDiagonal = 213;
             break;
 
-        case SIZE_213: // 2.13"
+        case 0x26: // 2.66"
 
-            v_screenSizeV = 212; // vertical = wide size
-            v_screenSizeH = 104; // horizontal = small size
+            _screenSizeV = 296; // vertical = wide size
+            _screenSizeH = 152; // horizontal = small size
+            _screenDiagonal = 266;
             break;
 
-        case SIZE_266: // 2.66"
+        case 0x27: // 2.71" and 2.71"-Touch
 
-            v_screenSizeV = 296; // vertical = wide size
-            v_screenSizeH = 152; // horizontal = small size
+            _screenSizeV = 264; // vertical = wide size
+            _screenSizeH = 176; // horizontal = small size
+            _screenDiagonal = 271;
             break;
 
-        case SIZE_271: // 2.71" and 2.71"-Touch
+        case 0x28: // 2.87"
 
-            v_screenSizeV = 264; // vertical = wide size
-            v_screenSizeH = 176; // horizontal = small size
+            _screenSizeV = 296; // vertical = wide size
+            _screenSizeH = 128; // horizontal = small size
+            _screenDiagonal = 287;
             break;
 
-        case SIZE_287: // 2.87"
+        case 0x29: // 2.90"
 
-            v_screenSizeV = 296; // vertical = wide size
-            v_screenSizeH = 128; // horizontal = small size
+            _screenSizeV = 384; // vertical = wide size
+            _screenSizeH = 168; // horizontal = small size
+            _screenDiagonal = 290;
             break;
 
-        case SIZE_290: // 2.90"
+        case 0x37: // 3.70" and 3.70"-Touch
 
-            v_screenSizeV = 384; // vertical = wide size
-            v_screenSizeH = 168; // horizontal = small size
+            _screenSizeV = 416; // vertical = wide size
+            _screenSizeH = 240; // horizontal = small size
+            _screenDiagonal = 370;
             break;
 
-        case SIZE_343: // 3.43" and 3.43"-Touch
+        case 0x41: // 4.17"
 
-            v_screenSizeV = 392; // vertical = wide size
-            v_screenSizeH = 456; // horizontal = small size
+            _screenSizeV = 300; // vertical = wide size
+            _screenSizeH = 400; // horizontal = small size
+            _screenDiagonal = 417;
             break;
 
-        case SIZE_350: // 3.50"
+        case 0x43: // 4.37"
 
-            v_screenSizeV = 384; // vertical = wide size
-            v_screenSizeH = 168; // horizontal = small size
+            _screenSizeV = 480; // vertical = wide size
+            _screenSizeH = 176; // horizontal = small size
+            _screenDiagonal = 437;
             break;
 
-        case SIZE_370: // 3.70" and 3.70"-Touch
+        case 0x56: // 5.65"
 
-            v_screenSizeV = 416; // vertical = wide size
-            v_screenSizeH = 240; // horizontal = small size
+            _screenSizeV = 600; // v = wide size
+            _screenSizeH = 448; // h = small size
+            _screenDiagonal = 565;
             break;
 
-        case SIZE_417: // 4.17"
+        case 0x58: // 5.81"
 
-            v_screenSizeV = 300; // vertical = wide size
-            v_screenSizeH = 400; // horizontal = small size
+            _screenSizeV = 720; // v = wide size
+            _screenSizeH = 256; // h = small size
+            _screenDiagonal = 581;
             break;
 
-        case SIZE_437: // 4.37"
+        case 0x74: // 7.40"
 
-            v_screenSizeV = 480; // vertical = wide size
-            v_screenSizeH = 176; // horizontal = small size
+            _screenSizeV = 800; // v = wide size
+            _screenSizeH = 480; // h = small size
+            _screenDiagonal = 741;
             break;
-
-        // Those screens are not available with embedded fast update or wide temperature
-        //         case SIZE_565: // 5.65"
-        //
-        //             v_screenSizeV = 600; // v = wide size
-        //             v_screenSizeH = 448; // h = small size
-        //             break;
-        //
-        //         case SIZE_581: // 5.81"
-        //
-        //             v_screenSizeV = 720; // v = wide size
-        //             v_screenSizeH = 256; // h = small size
-        //             break;
-        //
-        //         case SIZE_741: // 7.41"
-        //
-        //             v_screenSizeV = 800; // v = wide size
-        //             v_screenSizeH = 480; // h = small size
-        //             break;
-        //
-        //         case SIZE_969: // 9.69"
-        //
-        //             v_screenSizeV = 672; // v = wide size
-        //             v_screenSizeH = 960; // Actually, 960 = 480 x 2, h = small size
-        //             break;
-        //
-        //         case SIZE_1198: // 11.98"
-        //
-        //             v_screenSizeV = 768; // v = wide size
-        //             v_screenSizeH = 960; // Actually, 960 = 480 x 2, h = small size
-        //             break;
 
         default:
 
-            mySerial.println();
-            mySerial.println(formatString("hV * Screen %i-%cS-0%c is not supported", u_codeSize, u_codeFilm, u_codeDriver));
-            while (0x01);
             break;
     } // u_codeSize
-    v_screenDiagonal = u_codeSize;
 
-    // Report
-    mySerial.println(formatString("hV = Screen %s %ix%i", WhoAmI().c_str(), screenSizeX(), screenSizeY()));
-    mySerial.println(formatString("hV = Number %i-%cS-0%c", u_codeSize, u_codeFilm, u_codeDriver));
-    mySerial.println(formatString("hV = PDLS %s v%i.%i.%i", SCREEN_EPD_EXT3_VARIANT, SCREEN_EPD_EXT3_RELEASE / 100, (SCREEN_EPD_EXT3_RELEASE / 10) % 10, SCREEN_EPD_EXT3_RELEASE % 10));
-    mySerial.println();
-
-    u_bufferDepth = v_screenColourBits; // 2 colours
-    u_bufferSizeV = v_screenSizeV; // vertical = wide size
-    u_bufferSizeH = v_screenSizeH / 8; // horizontal = small size 112 / 8, 1 bit per pixel
+    u_bufferDepth = _screenColourBits; // 2 colours
+    u_bufferSizeV = _screenSizeV; // vertical = wide size
+    u_bufferSizeH = _screenSizeH / 8; // horizontal = small size 112 / 8, 1 bit per pixel
 
     // Force conversion for two unit16_t multiplication into uint32_t.
     // Actually for 1 colour; BWR requires 2 pages.
     u_pageColourSize = (uint32_t)u_bufferSizeV * (uint32_t)u_bufferSizeH;
 
+    // u_frameSize = u_pageColourSize, except for 9.69 and 11.98
+    // 9.69 and 11.98 combine two half-screens, hence two frames with adjusted size
+    switch (u_codeSize)
+    {
+        case 0x96: // 9.69"
+        case 0xB9: // 11.98"
+
+            u_frameSize = u_pageColourSize / 2;
+            break;
+
+        default:
+
+            u_frameSize = u_pageColourSize;
+            break;
+    } // u_codeSize
+
 #if defined(BOARD_HAS_PSRAM) // ESP32 PSRAM specific case
 
-    if (s_newImage == 0)
+    if (u_newImage == 0)
     {
         static uint8_t * _newFrameBuffer;
         _newFrameBuffer = (uint8_t *) ps_malloc(u_pageColourSize * u_bufferDepth);
-        s_newImage = (uint8_t *) _newFrameBuffer;
+        u_newImage = (uint8_t *) _newFrameBuffer;
     }
 
 #else // default case
 
-    if (s_newImage == 0)
+    if (u_newImage == 0)
     {
         static uint8_t * _newFrameBuffer;
         _newFrameBuffer = new uint8_t[u_pageColourSize * u_bufferDepth];
-        s_newImage = (uint8_t *) _newFrameBuffer;
+        u_newImage = (uint8_t *) _newFrameBuffer;
     }
 
 #endif // ESP32 BOARD_HAS_PSRAM
 
-    memset(s_newImage, 0x00, u_pageColourSize * u_bufferDepth);
+    memset(u_newImage, 0x00, u_pageColourSize * u_bufferDepth);
 
-    setTemperatureC(25); // 25 Celsius = 77 Fahrenheit
-    b_fsmPowerScreen = FSM_OFF;
-    setPowerProfile(MODE_MANUAL, SCOPE_GPIO_ONLY);
+    // Initialise the /CS pins
+    pinMode(b_pin.panelCS, OUTPUT);
+    digitalWrite(b_pin.panelCS, HIGH); // CS# = 1
 
-    // Turn SPI on, initialise GPIOs and set GPIO levels
-    // Reset panel and get tables
-    resume();
+    // New generic solution
+    pinMode(b_pin.panelDC, OUTPUT);
+    pinMode(b_pin.panelReset, OUTPUT);
+    pinMode(b_pin.panelBusy, INPUT); // All Pins 0
 
-    // Fonts
-    hV_Screen_Buffer::begin(); // Standard
+    // Initialise Flash /CS as HIGH
+    if (b_pin.flashCS != NOT_CONNECTED)
+    {
+        pinMode(b_pin.flashCS, OUTPUT);
+        digitalWrite(b_pin.flashCS, HIGH);
+    }
 
+    // Initialise slave panel /CS as HIGH
+    if (b_pin.panelCSS != NOT_CONNECTED)
+    {
+        pinMode(b_pin.panelCSS, OUTPUT);
+        digitalWrite(b_pin.panelCSS, HIGH);
+    }
+
+    // Initialise slave Flash /CS as HIGH
+    if (b_pin.flashCSS != NOT_CONNECTED)
+    {
+        pinMode(b_pin.flashCSS, OUTPUT);
+        digitalWrite(b_pin.flashCSS, HIGH);
+    }
+
+    // Initialise SD-card /CS as HIGH
+    if (b_pin.cardCS != NOT_CONNECTED)
+    {
+        pinMode(b_pin.cardCS, OUTPUT);
+        digitalWrite(b_pin.cardCS, HIGH);
+    }
+
+    // Initialise SPI
+    _settingScreen = {4000000, MSBFIRST, SPI_MODE0};
+
+#if defined(ENERGIA)
+
+    SPI.begin();
+    SPI.setBitOrder(_settingScreen.bitOrder);
+    SPI.setDataMode(_settingScreen.dataMode);
+    SPI.setClockDivider(SPI_CLOCK_MAX / min(SPI_CLOCK_MAX, _settingScreen.clock));
+
+#else
+
+#if defined(ARDUINO_XIAO_ESP32C3)
+
+    // Board Xiao ESP32-C3 crashes if pins are specified.
+    SPI.begin(8, 9, 10); // SCK MISO MOSI
+
+#elif defined(ARDUINO_NANO_ESP32)
+
+    // Board Arduino Nano ESP32 arduino_nano_nora v2.0.11
+    SPI.begin();
+
+#elif defined(ARDUINO_ARCH_ESP32)
+
+    // Board ESP32-Pico-DevKitM-2 crashes if pins are not specified.
+    SPI.begin(14, 12, 13); // SCK MISO MOSI
+
+#else
+
+    SPI.begin();
+
+#endif // ARDUINO_ARCH_ESP32
+
+    SPI.beginTransaction(_settingScreen);
+
+#endif // ENERGIA
+
+    // Reset
+    switch (u_codeSize)
+    {
+        case 0x56: // 5.65"
+        case 0x58: // 5.81"
+        case 0x74: // 7.40"
+
+            b_reset(200, 20, 200, 50, 5); // medium
+            break;
+
+        case 0x96: // 9.69"
+        case 0xB9: // 11.98"
+
+            b_reset(200, 20, 200, 200, 5); // large
+            break;
+
+        default:
+
+            b_reset(5, 5, 10, 5, 5); // small
+            break;
+    } // u_codeSize
+
+    // Check after reset
+    if (_flag152 == true)
+    {
+        if (digitalRead(b_pin.panelBusy) == HIGH)
+        {
+            Serial.println();
+            Serial.println("* ERROR - Incorrect type for 1.52-Wide");
+            while (true);
+        }
+    }
+
+    // Check type and get tables
+    COG_getUserData(); // nothing sent to panel
+
+    // Standard
+    hV_Screen_Buffer::begin();
+
+    setOrientation(0);
     if (f_fontMax() > 0)
     {
         f_selectFont(0);
     }
     f_fontSolid = false;
 
-    // Orientation
-    setOrientation(0);
-
-    v_penSolid = false;
+    _penSolid = false;
     u_invert = false;
 
-    //
-    // === Touch section
-    //
+    // Report
+    Serial.println(formatString("= Screen %s %ix%i", WhoAmI().c_str(), screenSizeX(), screenSizeY()));
+    Serial.println(formatString("= PDLS %s v%i.%i.%i", SCREEN_EPD_EXT3_VARIANT, SCREEN_EPD_EXT3_RELEASE / 100, (SCREEN_EPD_EXT3_RELEASE / 10) % 10, SCREEN_EPD_EXT3_RELEASE % 10));
 
-    //
-    // === End of Touch section
-    //
+    clear();
 }
 
-STRING_TYPE Screen_EPD_EXT3_Fast::WhoAmI()
+String Screen_EPD_EXT3_Fast::WhoAmI()
 {
     char work[64] = {0};
     u_WhoAmI(work);
 
-    return formatString("iTC %i.%02i\"%s", v_screenDiagonal / 100, v_screenDiagonal % 100, work);
-}
-
-void Screen_EPD_EXT3_Fast::suspend(uint8_t suspendScope)
-{
-    if (((suspendScope & FSM_GPIO_MASK) == FSM_GPIO_MASK) and (b_pin.panelPower != NOT_CONNECTED))
-    {
-        if ((b_fsmPowerScreen & FSM_GPIO_MASK) == FSM_GPIO_MASK)
-        {
-            b_suspend();
-        }
-    }
-}
-
-void Screen_EPD_EXT3_Fast::resume()
-{
-    // Target   FSM_ON
-    // Source   FSM_OFF
-    //          FSM_SLEEP
-    if (b_fsmPowerScreen != FSM_ON)
-    {
-        if ((b_fsmPowerScreen & FSM_GPIO_MASK) != FSM_GPIO_MASK)
-        {
-            b_resume(); // GPIO
-
-            s_reset(); // Reset
-
-            b_fsmPowerScreen |= FSM_GPIO_MASK;
-        }
-
-        // Check type and get tables
-        if (u_flagOTP == false)
-        {
-            s_getDataOTP(); // 3-wire SPI read OTP memory
-
-            s_reset(); // Reset
-        }
-
-        // Start SPI
-        switch (u_eScreen_EPD)
-        {
-            case eScreen_EPD_150_KS_0J:
-            case eScreen_EPD_152_KS_0J:
-
-                hV_HAL_SPI_begin(16000000); // 1.52" tested with 4, 8, 16 and 32 MHz, with unicity check
-                break;
-
-            case eScreen_EPD_206_KS_0E:
-            case eScreen_EPD_290_KS_0F:
-
-                hV_HAL_SPI_begin(16000000); // 2.06" tested with 4, 8 and 16 MHz, with unicity check
-                break;
-
-            default:
-
-                hV_HAL_SPI_begin(); // Standard 8 MHz, with unicity check
-                break;
-        }
-    }
-}
-
-void Screen_EPD_EXT3_Fast::s_reset()
-{
-    switch (b_family)
-    {
-        case FAMILY_MEDIUM:
-
-            COG_MediumKP_reset();
-            break;
-
-        case FAMILY_SMALL:
-
-            COG_SmallKP_reset();
-            break;
-
-        default:
-
-            break;
-    }
-}
-
-void Screen_EPD_EXT3_Fast::s_getDataOTP()
-{
-    hV_HAL_SPI_end(); // With unicity check
-
-    hV_HAL_SPI3_begin(); // Define 3-wire SPI pins
-
-    // Get data OTP
-    switch (b_family)
-    {
-        case FAMILY_MEDIUM:
-
-            COG_MediumKP_getDataOTP();
-            break;
-
-        case FAMILY_SMALL:
-
-            COG_SmallKP_getDataOTP();
-            break;
-
-        default:
-
-            break;
-    }
-}
-
-void Screen_EPD_EXT3_Fast::s_flush(uint8_t updateMode)
-{
-    // Resume
-    if (b_fsmPowerScreen != FSM_ON)
-    {
-        resume();
-    }
-
-    switch (b_family)
-    {
-        case FAMILY_MEDIUM:
-
-            COG_MediumKP_initial(updateMode); // Initialise
-            COG_MediumKP_sendImageData(updateMode); // Send image data
-            COG_MediumKP_update(updateMode); // Update
-            COG_MediumKP_powerOff(); // Power off
-            break;
-
-        case FAMILY_SMALL:
-
-            COG_SmallKP_initial(updateMode); // Initialise
-            COG_SmallKP_sendImageData(updateMode); // Send image data
-            COG_SmallKP_update(updateMode); // Update
-            COG_SmallKP_powerOff(); // Power off
-            break;
-
-        default:
-
-            break;
-    }
-
-    // Suspend
-    if (u_suspendMode == MODE_AUTO)
-    {
-        suspend(u_suspendScope);
-    }
+    return formatString("iTC %i.%02i\"%s", _screenDiagonal / 100, _screenDiagonal % 100, work);
 }
 
 uint8_t Screen_EPD_EXT3_Fast::flushMode(uint8_t updateMode)
@@ -1293,13 +638,12 @@ uint8_t Screen_EPD_EXT3_Fast::flushMode(uint8_t updateMode)
         case UPDATE_FAST:
         case UPDATE_GLOBAL:
 
-            s_flush(UPDATE_FAST);
+            _flushFast();
             break;
 
         default:
 
-            mySerial.println();
-            mySerial.println("hV ! PDLS - UPDATE_NONE invoked");
+            Serial.println("* PDLS - UPDATE_NONE invoked");
             break;
     }
 
@@ -1311,33 +655,233 @@ void Screen_EPD_EXT3_Fast::flush()
     flushMode(UPDATE_FAST);
 }
 
+void Screen_EPD_EXT3_Fast::_flushFast()
+{
+    // Configure
+#if FLUSH_TIMING
+    Serial.println("COG_initial");
+    uint32_t t0 = millis();
+#endif
+    COG_initial(UPDATE_FAST);
+#if FLUSH_TIMING
+    uint32_t t1 = millis();
+    char msg[8];
+    itoa(t1 - t0, msg, 10);
+    Serial.println(msg);
+
+    Serial.println("COG_send");
+    t0 = millis();
+#endif
+    // Send image data
+    COG_sendImageDataFast();
+#if FLUSH_TIMING
+    t1 = millis();
+    itoa(t1 - t0, msg, 10);
+    Serial.println(msg);
+
+    Serial.println("COG_update");
+    t0 = millis();
+#endif
+    // Update
+    COG_update(UPDATE_FAST);
+#if FLUSH_TIMING
+    t1 = millis();
+    itoa(t1 - t0, msg, 10);
+    Serial.println(msg);
+
+    Serial.println("COG_off");
+    t0 = millis();
+#endif
+    COG_powerOff();
+#if FLUSH_TIMING
+    t1 = millis();
+    itoa(t1 - t0, msg, 10);
+    Serial.println(msg);
+#endif
+}
+
+void Screen_EPD_EXT3_Fast::flush_task()
+{
+    if (flushState == kReady) return;
+    if (digitalRead(b_pin.panelBusy) != nextBusyPinState) return;
+
+    switch (flushState)
+    {
+        case kCOGInitial_1:
+            // finish COG_Initial _flag152 case
+            // Work settings
+            b_sendCommandData8(0x1a, u_temperature);
+            b_sendCommandData8(0x3c, 0xc0);
+            b_sendCommandData8(0x22, 0xdf);
+
+            flush_sendImageAndStartUpdate();
+            break;
+        case kCOGInitial_2:
+            // finish COG_Initial else
+            b_sendIndexData(0xe5, indexE5_work, 1); // Input Temperature
+            b_sendIndexData(0xe0, indexE0_work, 1); // Activate Temperature
+
+            if (u_codeSize == 0x29) // No PSR
+            {
+                b_sendCommandData8(0x4d, 0x55);
+                b_sendCommandData8(0xe9, 0x02);
+            }
+            else
+            {
+                b_sendIndexData(0x00, index00_work, 2); // PSR
+            }
+
+            // Specific settings for fast update, all screens
+            if (u_codeExtra & FEATURE_FAST)
+            {
+                uint8_t index50c_work[1]; // Vcom
+                index50c_work[0] = index50c_data[0]; // 0x07
+                b_sendIndexData(0x50, index50c_work, 1); // Vcom and data interval setting
+            }
+
+            // Additional settings for fast update, 154 213 266 and 370 screens (_flag50)
+            if ((u_codeExtra & FEATURE_FAST) && _flag50)
+            {
+                uint8_t index50a_work[1]; // Vcom
+                index50a_work[0] = index50a_data[0]; // 0x27
+                b_sendIndexData(0x50, index50a_work, 1); // Vcom and data interval setting
+            }
+
+            flush_sendImageAndStartUpdate();
+            break;
+        case kCOGUpdate_1:
+            b_sendCommand8(0x20); // Display Refresh
+            digitalWrite(b_pin.panelCS, HIGH); // CS# = 1
+            nextBusyPinState = LOW;
+            flushState = kCOGPowerOff_1;
+            break;
+        case kCOGUpdate_2:
+            b_sendCommand8(0x12); // Display Refresh
+            digitalWrite(b_pin.panelCS, HIGH); // CS# = 1
+            nextBusyPinState = HIGH;
+            flushState = kCOGPowerOff_1;
+            break;
+        case kCOGPowerOff_1:
+            if (_flag152 == true)
+            {
+                flushState = kReady;
+            }
+            else
+            {
+                b_sendCommand8(0x02); // Turn off DC/DC
+                digitalWrite(b_pin.panelCS, HIGH); // CS# = 1
+                nextBusyPinState = HIGH;
+                flushState = kCOGPowerOff_2;
+            }
+            break;
+        case kCOGPowerOff_2:
+            flushState = kReady;
+            break;
+        default:
+            break;
+    }
+
+    if ((flushState == kReady) && flushPending)
+    {
+        // start a new flush cycle
+        flush_nonBlocking();
+        flushPending = false;
+    }
+}
+
+void Screen_EPD_EXT3_Fast::flush_sendImageAndStartUpdate()
+{
+    COG_sendImageDataFast();
+
+    // start COG_Update
+    if (_flag152 == true)
+    {
+        nextBusyPinState = LOW;
+        flushState = kCOGUpdate_1;
+    }
+    else
+    {
+        // Specific settings for fast update, 154 213 266 and 370 screens (_flag50)
+        if ((u_codeExtra & FEATURE_FAST) && _flag50)
+        {
+            index50b_work[0] = index50b_data[0]; // 0x07
+            b_sendIndexData(0x50, index50b_work, 1); // Vcom and data interval setting
+        }
+
+        b_sendCommand8(0x04); // Power on
+        digitalWrite(b_pin.panelCS, HIGH); // CS# = 1
+        nextBusyPinState = HIGH;
+        flushState = kCOGUpdate_2;
+    }
+}
+
+void Screen_EPD_EXT3_Fast::flush_nonBlocking()
+{
+    if (flushState != kReady)
+    {
+        flushPending = true;
+        return;
+    }
+
+    if (_flag152 == true)
+    {
+        // Soft reset
+        b_sendCommand8(0x12);
+        digitalWrite(b_pin.panelDC, LOW); // Select
+        nextBusyPinState = LOW;
+        flushState = kCOGInitial_1;
+    }
+    else
+    {
+        indexE0_work[0] = indexE0_data[0];
+        indexE5_data[0] = u_temperature;
+        if (u_codeExtra & FEATURE_FAST) // Specific settings for fast update
+        {
+            indexE5_work[0] = indexE5_data[0] | 0x40; // temperature | 0x40
+            index00_work[0] = index00_data[0] | 0x10; // PSR0 | 0x10
+            index00_work[1] = index00_data[1] | 0x02; // PSR1 | 0x02
+        }
+        else // Common settings
+        {
+            indexE5_work[0] = indexE5_data[0]; // Temperature
+            index00_work[0] = index00_data[0]; // PSR0
+            index00_work[1] = index00_data[1]; // PSR1
+        } // u_codeExtra updateMode
+
+        // New algorithm
+        uint8_t index00_reset[] = {0x0e};
+        b_sendIndexData(0x00, index00_reset, 1); // Soft-reset
+        nextBusyPinState = HIGH;
+        flushState = kCOGInitial_2;
+    }
+}
+
 void Screen_EPD_EXT3_Fast::clear(uint16_t colour)
 {
     if (colour == myColours.grey)
     {
-        // black = 0-1, white = 0-0
         for (uint16_t i = 0; i < u_bufferSizeV; i++)
         {
-            uint8_t pattern = (i % 2) ? 0b10101010 : 0b01010101;
+            uint16_t pattern = (i % 2) ? 0b10101010 : 0b01010101;
             for (uint16_t j = 0; j < u_bufferSizeH; j++)
             {
-                s_newImage[i * u_bufferSizeH + j] = pattern;
+                u_newImage[i * u_bufferSizeH + j] = pattern;
             }
         }
     }
     else if ((colour == myColours.white) xor u_invert)
     {
-        // physical black 0-0
-        memset(s_newImage, 0x00, u_pageColourSize);
+        // physical black 00
+        memset(u_newImage, 0x00, u_pageColourSize);
     }
     else
     {
-        // physical white 1-0
-        memset(s_newImage, 0xff, u_pageColourSize);
+        // physical white 10
+        memset(u_newImage, 0xff, u_pageColourSize);
     }
 }
 
-void Screen_EPD_EXT3_Fast::regenerate(uint8_t mode)
+void Screen_EPD_EXT3_Fast::regenerate()
 {
     clear(myColours.black);
     flush();
@@ -1348,10 +892,11 @@ void Screen_EPD_EXT3_Fast::regenerate(uint8_t mode)
     delay(100);
 }
 
-void Screen_EPD_EXT3_Fast::s_setPoint(uint16_t x1, uint16_t y1, uint16_t colour)
+void Screen_EPD_EXT3_Fast::_setPoint(uint16_t x1, uint16_t y1, uint16_t colour)
 {
     // Orient and check coordinates are within screen
-    if (s_orientCoordinates(x1, y1) == RESULT_ERROR)
+    // _orientCoordinates() returns false = success, true = error
+    if (_orientCoordinates(x1, y1) == RESULT_ERROR)
     {
         return;
     }
@@ -1372,47 +917,47 @@ void Screen_EPD_EXT3_Fast::s_setPoint(uint16_t x1, uint16_t y1, uint16_t colour)
     }
 
     // Coordinates
-    uint32_t z1 = s_getZ(x1, y1);
-    uint16_t b1 = s_getB(x1, y1);
+    uint32_t z1 = _getZ(x1, y1);
+    uint16_t b1 = _getB(x1, y1);
 
     // Basic colours
     if ((colour == myColours.white) xor u_invert)
     {
-        // physical black 0-0
-        bitClear(s_newImage[z1], b1);
+        // physical black 00
+        bitClear(u_newImage[z1], b1);
     }
     else if ((colour == myColours.black) xor u_invert)
     {
-        // physical white 1-0
-        bitSet(s_newImage[z1], b1);
+        // physical white 10
+        bitSet(u_newImage[z1], b1);
     }
 }
 
-void Screen_EPD_EXT3_Fast::s_setOrientation(uint8_t orientation)
+void Screen_EPD_EXT3_Fast::_setOrientation(uint8_t orientation)
 {
-    v_orientation = orientation % 4;
+    _orientation = orientation % 4;
 }
 
-bool Screen_EPD_EXT3_Fast::s_orientCoordinates(uint16_t & x, uint16_t & y)
+bool Screen_EPD_EXT3_Fast::_orientCoordinates(uint16_t & x, uint16_t & y)
 {
-    bool _flagResult = RESULT_ERROR;
-    switch (v_orientation)
+    bool _flagResult = RESULT_ERROR; // false = success, true = error
+    switch (_orientation)
     {
         case 3: // checked, previously 1
 
-            if ((x < v_screenSizeV) and (y < v_screenSizeH))
+            if ((x < _screenSizeV) and (y < _screenSizeH))
             {
-                x = v_screenSizeV - 1 - x;
+                x = _screenSizeV - 1 - x;
                 _flagResult = RESULT_SUCCESS;
             }
             break;
 
         case 2: // checked
 
-            if ((x < v_screenSizeH) and (y < v_screenSizeV))
+            if ((x < _screenSizeH) and (y < _screenSizeV))
             {
-                x = v_screenSizeH - 1 - x;
-                y = v_screenSizeV - 1 - y;
+                x = _screenSizeH - 1 - x;
+                y = _screenSizeV - 1 - y;
                 swap(x, y);
                 _flagResult = RESULT_SUCCESS;
             }
@@ -1420,16 +965,16 @@ bool Screen_EPD_EXT3_Fast::s_orientCoordinates(uint16_t & x, uint16_t & y)
 
         case 1: // checked, previously 3
 
-            if ((x < v_screenSizeV) and (y < v_screenSizeH))
+            if ((x < _screenSizeV) and (y < _screenSizeH))
             {
-                y = v_screenSizeH - 1 - y;
+                y = _screenSizeH - 1 - y;
                 _flagResult = RESULT_SUCCESS;
             }
             break;
 
         default: // checked
 
-            if ((x < v_screenSizeH) and (y < v_screenSizeV))
+            if ((x < _screenSizeH) and (y < _screenSizeV))
             {
                 swap(x, y);
                 _flagResult = RESULT_SUCCESS;
@@ -1440,33 +985,18 @@ bool Screen_EPD_EXT3_Fast::s_orientCoordinates(uint16_t & x, uint16_t & y)
     return _flagResult;
 }
 
-uint32_t Screen_EPD_EXT3_Fast::s_getZ(uint16_t x1, uint16_t y1)
+uint32_t Screen_EPD_EXT3_Fast::_getZ(uint16_t x1, uint16_t y1)
 {
     uint32_t z1 = 0;
     // According to 11.98 inch Spectra Application Note
-    // at http://www.pervasivedisplays.com/LiteratureRetrieve.aspx?ID=245146
-    switch (u_codeSize)
-    {
-        case SIZE_969:
-        case SIZE_1198:
+    // at http:// www.pervasivedisplays.com/LiteratureRetrieve.aspx?ID=245146
 
-            if (y1 >= (v_screenSizeH >> 1))
-            {
-                y1 -= (v_screenSizeH >> 1); // rebase y1
-                z1 += (u_pageColourSize >> 1); // buffer second half
-            }
-            z1 += (uint32_t)x1 * (u_bufferSizeH >> 1) + (y1 >> 3);
-            break;
+    z1 = (uint32_t)x1 * u_bufferSizeH + (y1 >> 3);
 
-        default:
-
-            z1 = (uint32_t)x1 * u_bufferSizeH + (y1 >> 3);
-            break;
-    }
     return z1;
 }
 
-uint16_t Screen_EPD_EXT3_Fast::s_getB(uint16_t x1, uint16_t y1)
+uint16_t Screen_EPD_EXT3_Fast::_getB(uint16_t x1, uint16_t y1)
 {
     uint16_t b1 = 0;
 
@@ -1475,9 +1005,41 @@ uint16_t Screen_EPD_EXT3_Fast::s_getB(uint16_t x1, uint16_t y1)
     return b1;
 }
 
-uint16_t Screen_EPD_EXT3_Fast::s_getPoint(uint16_t x1, uint16_t y1)
+uint16_t Screen_EPD_EXT3_Fast::_getPoint(uint16_t x1, uint16_t y1)
 {
-    return 0x0000;
+    // Orient and check coordinates are within screen
+    // _orientCoordinates() returns false = success, true = error
+    if (_orientCoordinates(x1, y1) == RESULT_ERROR)
+    {
+        return 0;
+    }
+
+    uint16_t _result = 0;
+    uint8_t _value = 0;
+
+    // Coordinates
+    uint32_t z1 = _getZ(x1, y1);
+    uint16_t b1 = _getB(x1, y1);
+
+    _value = bitRead(u_newImage[z1], b1);
+    _value <<= 4;
+    _value &= 0b11110000;
+
+    // red = 0-1, black = 1-0, white 0-0
+    switch (_value)
+    {
+        case 0x10:
+
+            _result = myColours.black;
+            break;
+
+        default:
+
+            _result = myColours.white;
+            break;
+    }
+
+    return _result;
 }
 //
 // === End of Class section

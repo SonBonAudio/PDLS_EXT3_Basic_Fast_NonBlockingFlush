@@ -117,7 +117,7 @@ void hV_HAL_SPI3_begin();
 /// @param pinData combined data, default = MOSI
 /// @note For manual configuration only
 ///
-void hV_HAL_SPI3_define(uint8_t pinClock = SCK, uint8_t pinData = MOSI);
+/////ZZZ void hV_HAL_SPI3_define(uint8_t pinClock = SCK, uint8_t pinData = MOSI);
 
 ///
 /// @brief Read a single byte
@@ -125,7 +125,7 @@ void hV_HAL_SPI3_define(uint8_t pinClock = SCK, uint8_t pinData = MOSI);
 /// @note Configure the clock pin as output and data pin as input.
 /// @warning /CS to be managed externally.
 ///
-uint8_t hV_HAL_SPI3_read();
+//////ZZZ uint8_t hV_HAL_SPI3_read();
 
 ///
 /// @brief Write a single byte
