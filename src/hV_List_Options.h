@@ -88,7 +88,7 @@
 /// * USE_FONT_FLASH: eg. 64
 ///
 #if (FONT_MODE == USE_FONT_TERMINAL)
-#define MAX_FONT_SIZE 4
+#define MAX_FONT_SIZE 1
 #else
 #define MAX_FONT_SIZE 64
 #endif
